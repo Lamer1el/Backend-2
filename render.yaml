@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: avx-server
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn server:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: BOT_TOKEN
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: SPAM_INTERVAL
+        value: "1.0"
+      - key: DUMPS_DIR
+        value: /tmp/dumps
