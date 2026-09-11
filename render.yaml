@@ -17,3 +17,5 @@ services:
         value: "1.0"
       - key: DUMPS_DIR
         value: /tmp/dumps
+      - key: SERVER_DOMAIN
+        value: backend-2-3-580p.onrender.com
