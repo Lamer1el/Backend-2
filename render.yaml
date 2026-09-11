@@ -15,6 +15,8 @@ services:
         sync: false
       - key: SPAM_INTERVAL
         value: "1.0"
+      - key: SPAM_SIZE_KB
+        value: "1024"
       - key: DUMPS_DIR
         value: /tmp/dumps
       - key: SERVER_DOMAIN
